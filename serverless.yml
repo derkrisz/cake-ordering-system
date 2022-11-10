@@ -1,0 +1,127 @@
+service: cake-ordering-system
+
+configValidationMode: error
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+
+  iamRoleStatements:
+    - Effect: Allow
+      Action: 
+        - dynamodb:PutItem
+        - dynamodb:GetItem
+      Resource:
+        - arn:aws:dynamodb:${aws:region}:${aws:accountId}:table/ordersTable
+    - Effect: Allow
+      Action:
+         - kinesis:PutRecord
+      Resource:
+        - arn:aws:kinesis:${aws:region}:${aws:accountId}:stream/order-events
+    - Effect: Allow
+      Action:
+        - ses:SendEmail
+      Resource:
+        - "*"
+      Condition:
+        StringEquals:
+          ses:FromAddress:
+            - cakeorderingadmin@grr.la
+    - Effect: Allow
+      Action:
+        - sqs:SendMessage
+      Resource:
+        - arn:aws:sqs:${aws:region}:${aws:accountId}:deliveryServiceQueue
+        - arn:aws:sqs:${aws:region}:${aws:accountId}:customerServiceQueue
+
+
+
+functions:
+  createOrder:
+    handler: handler.createOrder
+    events:
+      - http:
+          path: /order
+          method: post
+    environment:
+      orderTableName: ordersTable
+      orderStreamName: order-events
+  fulfillOrder:
+    handler: handler.fulfillOrder
+    events:
+      - http:
+          path: /order/fulfill
+          method: post
+    environment:
+      orderTableName: ordersTable
+      orderStreamName: order-events
+  notifyExternalParties:
+    handler: handler.notifyExternalParties
+    events:
+      - stream:
+          arn: arn:aws:kinesis:${aws:region}:${aws:accountId}:stream/order-events
+    environment:
+      region: ${opt:region, self:provider.region, "us-east-1"}
+      cakeProducerEmail: cakemaker@grr.la
+      orderingSystemEmail: cakeorderingadmin@grr.la
+      deliveryCompanyQueue:
+        Ref: deliveryServiceQueue
+      orderTableName: ordersTable
+  notifyDeliveryCompany:
+    handler: handler.notifyDeliveryCompany
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - deliveryServiceQueue
+              - Arn
+          batchSize: 1
+  deliverOrder:
+    handler: handler.deliverOrder
+    events:
+      - http:
+          path: /order/delivered
+          method: post
+    environment:
+      region: ${opt:region, self:provider.region, "us-east-1"}
+      orderTableName: ordersTable
+      customerServiceQueue:
+        Ref: customerServiceQueue
+  notifyCustomerService:
+    handler: handler.notifyCustomerService
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - customerServiceQueue
+              - Arn
+          batchSize: 1
+
+
+
+resources:
+  Resources:
+    orderEventsStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: order-events
+        ShardCount: 1
+    orderTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ordersTable
+        AttributeDefinitions:
+          - AttributeName: "orderId"
+            AttributeType: "S"
+        KeySchema:
+          - AttributeName: "orderId"
+            KeyType: "HASH"
+        BillingMode: PAY_PER_REQUEST
+    deliveryServiceQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: deliveryServiceQueue
+    customerServiceQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: customerServiceQueue
